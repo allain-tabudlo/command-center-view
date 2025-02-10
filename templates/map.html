@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leaflet Map with MGRS and Tracking</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+
+  <style>
+    #container {
+      display: flex;
+      height: 85vh;
+      width: 100vw;
+      margin: 0;a
+      padding: 0;
+    }
+    #sidebar {
+      width: 25%;
+      height: 85vh;
+      overflow-y: auto;
+      padding: 10px;
+      border-right: 1px solid #ccc;
+      background-color: #f8f9fa;
+      box-sizing: border-box;
+    }
+    #map {
+      width: 75%;
+      height: 85vh;
+    }
+    .hover-label {
+      font-weight: bold;
+    }
+    .collapsible {
+      background-color: #777;
+      color: white;
+      cursor: pointer;
+      padding: 10px;
+      width: 100%;
+      text-align: left;
+      border: none;
+      outline: none;
+      font-size: 15px;
+    }
+    .active, .collapsible:hover {
+      background-color: #555;
+    }
+    .content {
+      display: none;
+      overflow: hidden;
+      padding: 10px;
+      background-color: #f1f1f1;
+    }
+    .icon {
+      cursor: grab; /* Indicate that the icon can be dragged */
+    }
+    .icon:active {
+      cursor: grabbing;
+    }
+    .custom-label {
+      font-size: 12px;
+      font-weight: bold;
+      color: black; 
+      background: transparent !important;
+      border: none !important; 
+      box-shadow: none !important;
+      padding: 3px;
+      text-align: center;
+    }
+    
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="sidebar">
+      <button class="collapsible">Players</button>
+      <div class="content" id="player-list"></div>
+      <button class="collapsible">Markers</button>
+      <div class="content" id="icon-list">
+        <button class="collapsible">Special Markers</button>
+          <div class="content" id="custom-marker-list">
+            <div class="icon" draggable="true" data-icon-type="x">❌ X Mark</div>
+            <div class="icon" draggable="true" data-icon-type="flag">🏁 Flag</div>
+          </div>
+        
+        <button class="collapsible">Custom Markers</button>
+          <div class="content" id="custom-marker-list">
+            <div class="icon" draggable="true" data-icon-type="circle">⚪ Custom Circle</div>
+
+            <div id="controls">
+              <button id="toggle-move">Move Mode</button>
+              <button id="toggle-draw">Draw Mode</button>
+              <button id="cancel-drawing" style="display: none;">Cancel</button>
+              <input type="color" id="color-picker" value="#3388ff" style="margin-left: 10px;">
+          </div>
+          
+        </div>
+
+        
+      </div>
+    </div>
+    <div id="map"></div>
+  </div>
+  <div id="navigation">
+    <button onclick="window.location.href='/replay'">Go to Replay</button>
+  </div>
+  <div id="player-update">
+    <h3>Update Player Location</h3>
+    <label for="player-id">Player ID:</label>
+    <input type="number" id="player-id" placeholder="Enter Player ID">
+    
+    <label for="latitude">Latitude:</label>
+    <input type="text" id="latitude" placeholder="Enter Latitude">
+    
+    <label for="longitude">Longitude:</label>
+    <input type="text" id="longitude" placeholder="Enter Longitude">
+
+    <button onclick="updatePlayerLocation()">Update Location</button>
+</div>
+
+
+  <script>
+    // set the view of the map
+    const map = L.map('map').setView([15.4561, 120.6397], 14);
+
+    // Base layers
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: 'OpenStreetMap' });
+    const topo = L.tileLayer('https://tile.opentopomap.org/{z}/{x}/{y}.png', { attribution: 'OpenTopoMap' });
+
+    const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles © Esri — Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom, 2013',
+});
+    osm.addTo(map);
+    const baseMaps = {
+      "OpenStreetMap": osm,
+      "Topo Map": topo,
+      "Satellite View": satellite,
+    };
+    L.control.layers(baseMaps).addTo(map);
+
+        // Add a simple grid overlay as a placeholder for MGRS
+        const gridLayer = L.gridLayer({
+          pane: 'overlayPane',
+          attribution: 'MGRS Grid (Custom)'
+        }).addTo(map);
+    
+        gridLayer.createTile = function(coords) {
+          const tile = document.createElement('div');
+          tile.style.outline = '2px solid rgba(0,0,0,0.5)'; 
+          tile.style.backgroundColor = 'rgba(0,0,0,0)';
+          tile.innerHTML = `MGRS: ${coords.x}, ${coords.y}`
+          tile.style.fontSize = '14px'; 
+          tile.style.color = 'black';
+          tile.style.textAlign = 'center';
+          return tile;
+        };
+
+    let playerMarkers = {}; 
+    let trackingMarkers = {};
+    let trackingLines = {};     
+
+    async function fetchPlayerData() {
+      try {
+          // Fetch player data
+          const playerResponse = await fetch('/get-latest-player-data');
+          const players = await playerResponse.json();
+  
+          // Fetch special markers
+          const markerResponse = await fetch('/get-special-markers');
+          const specialMarkers = await markerResponse.json();
+  
+          //Store previous checkbox states
+          const previousCheckboxStates = {};
+          document.querySelectorAll('#player-list input[type="checkbox"]').forEach(checkbox => {
+              previousCheckboxStates[checkbox.dataset.playerId] = checkbox.checked;
+          });
+  
+          // Display player markers
+          const latestPositions = {};
+          players.forEach((player) => {
+              latestPositions[player.player_id] = player;
+          });
+  
+          const playerList = document.getElementById('player-list');
+          playerList.innerHTML = '';
+  
+          Object.values(latestPositions).forEach((player) => {
+
+            const { 
+                player_id, 
+                player_name, 
+                player_rank, 
+                player_unit,
+                player_DSG,  
+                player_latitude, 
+                player_longitude, 
+                speed 
+            } = player;
+  
+              // Create checkbox for tracking
+              const playerItem = document.createElement('div');
+              playerItem.innerHTML = `
+                  <label>
+                      <input type="checkbox" id="track-player-${player_id}" data-player-id="${player_id}"> Track ${player_name}
+                  </label>
+              `;
+              playerList.appendChild(playerItem);
+  
+              const trackCheckbox = document.getElementById(`track-player-${player_id}`);
+              if (previousCheckboxStates[player_id]) {
+                  trackCheckbox.checked = true;
+              }
+  
+              // Remove old marker before updating
+              if (playerMarkers[player_id]) {
+                  map.removeLayer(playerMarkers[player_id]);
+              }
+  
+              // Create or update player marker
+              const marker = L.circleMarker([player_latitude, player_longitude], {
+                  color: 'red',
+                  radius: 10,
+                  fillColor: '#f03',
+                  fillOpacity: 0.5,
+              }).addTo(map);
+  
+              // Add hover tooltip
+              marker.bindTooltip(`<strong>${player_name}</strong>`, {
+                  permanent: false,
+                  direction: "top",
+                  className: "player-tooltip"
+              });
+  
+              // Add popup with player info
+              marker.bindPopup(`
+                  <strong>${player_name}</strong><br>
+                  Rank: ${player_rank}<br>
+                  Unit: ${player_unit}<br>
+                  DSG: ${player_DSG}<br>
+              `);
+  
+              // Store marker reference
+              playerMarkers[player_id] = marker;
+          });
+  
+          Object.values(latestPositions).forEach(player => {
+              const trackCheckbox = document.getElementById(`track-player-${player.player_id}`);
+              trackCheckbox.addEventListener('change', () => {
+                  if (trackCheckbox.checked) {
+                      enableTracking(player.player_id);
+                  } else {
+                      disableTracking(player.player_id);
+                  }
+              });
+          });
+  
+          // Display special markers
+          specialMarkers.forEach((markerData) => {
+              const { type, lat, lng } = markerData;
+  
+              const icon = L.divIcon({
+                  html: `<div style="font-size: 24px;">${type === 'x' ? '❌' : '🏁'}</div>`, // Default size
+                  className: '',
+              });
+  
+              L.marker([lat, lng], { icon }).addTo(map);
+          });
+  
+          console.log('update location');
+  
+      } catch (error) {
+          console.error('Error fetching player or marker data:', error);
+      }
+  }
+  //  Auto-refresh map every 5 seconds
+  //setInterval(fetchPlayerData, 15000);
+  
+fetchPlayerData();
+  
+    // Function to fetch and display custom markers
+    let customMarkers = [];
+
+    async function loadCustomMarkers() {
+      try {
+        // Remove old markers before fetching new ones
+        customMarkers.forEach(marker => map.removeLayer(marker));
+        customMarkers = []; 
+    
+        const response = await fetch('/get-custom-markers');
+        const markers = await response.json();
+    
+        markers.forEach(marker => {
+          const { lat, lng, radius, color, name } = marker;
+    
+          // Create accurate circle using database radius (meters)
+          const circle = L.circle([lat, lng], {
+            color: color,
+            fillColor: color,
+            fillOpacity: 0.5,
+            radius: radius,
+          }).addTo(map);
+    
+          // Attach label at the center
+          const tooltip = L.tooltip({
+            permanent: true,
+            direction: "center",
+            className: "custom-label",
+          }).setContent(name);
+    
+          circle.bindTooltip(tooltip).openTooltip();
+    
+          customMarkers.push(circle); // Store marker for refreshing
+        });
+    
+      } catch (error) {
+        console.error("Error loading custom markers:", error);
+      }
+    }
+    
+    // Function to adjust marker sizes on zoom to keep them visually consistent
+    function adjustMarkerSizes() {
+      let zoomScale = map.getZoom() / 15; // Adjust scale based on zoom level
+      customMarkers.forEach(({ circle, radius }) => {
+        circle.setRadius(radius * zoomScale); // Dynamically adjust radius
+      });
+    }
+    
+    loadCustomMarkers();
+    
+
+    
+
+    async function enableTracking(player_id) {
+      try {
+        const response = await fetch(`/get-player-history?player_id=${player_id}`);
+        const history = await response.json();
+
+        if (!history || history.length < 2) return;
+
+        history.forEach((point, index) => {
+          if (index > 0) {
+            const prev = history[index - 1];
+
+            const smallMarker = L.circleMarker([prev.latitude, prev.longitude], {
+              color: 'blue',
+              radius: 5,
+              fillColor: '#00f',
+              fillOpacity: 0.6,
+            }).addTo(map);
+
+            if (!trackingMarkers[player_id]) trackingMarkers[player_id] = [];
+            trackingMarkers[player_id].push(smallMarker);
+
+            const line = L.polyline([[prev.latitude, prev.longitude], [point.latitude, point.longitude]], {
+              color: 'blue',
+              weight: 2,
+              opacity: 0.7,
+            }).addTo(map);
+
+            if (!trackingLines[player_id]) trackingLines[player_id] = [];
+            trackingLines[player_id].push(line);
+          }
+        });
+      } catch (error) {
+        console.error('Error enabling tracking:', error);
+      }
+    }
+
+    function disableTracking(player_id) {
+      if (trackingMarkers[player_id]) {
+        trackingMarkers[player_id].forEach((marker) => map.removeLayer(marker));
+        delete trackingMarkers[player_id];
+      }
+
+      if (trackingLines[player_id]) {
+        trackingLines[player_id].forEach((line) => map.removeLayer(line));
+        delete trackingLines[player_id];
+      }
+    }
+
+// Initialize all collapsible buttons
+document.querySelectorAll('.collapsible').forEach((coll) => {
+  coll.addEventListener('click', function () {
+    this.classList.toggle('active');
+    const content = this.nextElementSibling;
+    if (content.style.display === 'block') {
+      content.style.display = 'none';
+    } else {
+      content.style.display = 'block';
+    }
+  });
+});
+
+  let editMarker = null;
+  let activeCircle = null;
+  
+
+  document.querySelectorAll('.icon').forEach((icon) => {
+    icon.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('icon-type', e.target.dataset.iconType);
+        e.dataTransfer.effectAllowed = 'move';
+    });
+});
+
+map.getContainer().addEventListener('dragover', (e) => e.preventDefault());
+map.getContainer().addEventListener('drop', (e) => {
+    e.preventDefault();
+
+    const iconType = e.dataTransfer.getData('icon-type');
+    if (!iconType) return;
+
+    const latlng = map.mouseEventToLatLng(e);
+
+    if (iconType === 'circle') {
+        createCustomCircle(latlng);
+    } else {
+        addIconToMap(latlng, iconType);
+    }
+});
+
+function addIconToMap(latlng, iconType) {
+    if (editMarker) return;
+
+    editMarker = L.marker(latlng, {
+        draggable: true,
+        icon: L.divIcon({
+            html: `<div style="font-size: 24px;">${iconType === 'x' ? '❌' : '🏁'}</div>`, 
+            className: '',
+        }),
+    }).addTo(map);
+
+    editMarker.markerType = iconType;
+
+    editMarker.bindPopup(`
+        <button onclick="saveIcon()">Save</button>
+        <button onclick="cancelIcon()">Cancel</button>
+    `).openPopup();
+}
+
+function createCustomCircle(latlng) {
+  if (activeCircle) return; // Prevent multiple circles
+
+  activeCircle = L.circle(latlng, {
+    color: "#ff0000",
+    fillColor: "#ff0000",
+    fillOpacity: 0.5,
+    radius: 50,
+    draggable: true,
+  }).addTo(map);
+
+  activeCircle.on("mousedown", function (e) {
+    map.dragging.disable(); 
+    map.on("mousemove", moveCircle);
+  });
+
+  map.on("mouseup", function () {
+    map.dragging.enable(); 
+    map.off("mousemove", moveCircle); 
+  });
+
+  function moveCircle(e) {
+    activeCircle.setLatLng(e.latlng);
+    updateResizeHandles(); 
+  }
+
+  addResizeHandles(activeCircle);
+  showEditPopup(activeCircle);
+}
+
+// Function to update the position of resize handles
+function updateResizeHandles() {
+  if (!activeCircle || !activeCircle._resizeHandles) return;
+
+  const latlng = activeCircle.getLatLng();
+  const radius = activeCircle.getRadius();
+  
+  // Convert radius to degrees (approximate conversion for latitude/longitude)
+  const offset = radius / 111320; // Convert meters to degrees
+
+  const corners = [
+    [latlng.lat + offset, latlng.lng - offset], // Top-left
+    [latlng.lat + offset, latlng.lng + offset], // Top-right
+    [latlng.lat - offset, latlng.lng - offset], // Bottom-left
+    [latlng.lat - offset, latlng.lng + offset], // Bottom-right
+  ];
+
+  // Update each handle's position
+  activeCircle._resizeHandles.forEach((handle, index) => {
+    handle.setLatLng(corners[index]);
+  });
+}
+
+
+function addResizeHandles(circle) {
+  if (circle._resizeHandles) {
+    circle._resizeHandles.forEach(handle => map.removeLayer(handle)); 
+  }
+
+  const latlng = circle.getLatLng();
+  const radius = circle.getRadius();
+  const offset = radius / 111320; // Convert meters to degrees
+
+  const corners = [
+    [latlng.lat + offset, latlng.lng - offset], // Top-left
+    [latlng.lat + offset, latlng.lng + offset], // Top-right
+    [latlng.lat - offset, latlng.lng - offset], // Bottom-left
+    [latlng.lat - offset, latlng.lng + offset], // Bottom-right
+  ];
+
+  let handles = [];
+  corners.forEach((corner, index) => {
+    let handle = L.circleMarker(corner, {
+      color: "black",
+      fillColor: "white",
+      fillOpacity: 1,
+      radius: 5,
+      draggable: true
+    }).addTo(map);
+
+    handle.on("mousedown", function (e) {
+      e.originalEvent.stopPropagation(); // Prevent map drag from triggering
+      map.dragging.disable(); 
+      map.on("mousemove", (event) => resizeCircle(event, circle, index));
+    });
+
+    map.on("mouseup", function () {
+      map.dragging.enable();
+      map.off("mousemove"); 
+      updateResizeHandles();
+    });
+
+    handles.push(handle);
+  });
+
+  circle._resizeHandles = handles;
+}
+
+// Function to dynamically resize the circle
+function resizeCircle(e, circle, handleIndex) {
+  const latlng = circle.getLatLng();
+  const newRadius = latlng.distanceTo(e.latlng);
+  circle.setRadius(newRadius);
+  updateResizeHandles(); // Ensure handles move with the circle
+}
+
+
+// Function to show the menu for editing options
+function showEditPopup(circle) {
+  const popupContent = document.createElement("div");
+
+  const colorPicker = document.createElement("input");
+  colorPicker.type = "color";
+  colorPicker.value = circle.options.color;
+  colorPicker.oninput = () => {
+    circle.setStyle({ color: colorPicker.value, fillColor: colorPicker.value });
+  };
+
+  const saveButton = document.createElement("button");
+  saveButton.textContent = "Save";
+  saveButton.onclick = async () => {
+    const name = prompt("Enter a name for this marker:");
+    if (!name) return;
+
+    const data = {
+      type: "custom_marker",
+      name,
+      radius: circle.getRadius(),
+      color: colorPicker.value,
+      lat: circle.getLatLng().lat,
+      lng: circle.getLatLng().lng
+    };
+
+    try {
+      const response = await fetch('/save-custom-marker', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+
+      if (response.ok) {
+        alert("Custom marker saved!");
+        map.removeLayer(circle);
+        if (circle._resizeHandles) {
+          circle._resizeHandles.forEach(handle => map.removeLayer(handle));
+        }
+        activeCircle = null;
+        loadCustomMarkers(); 
+      } else {
+        alert("Error saving marker.");
+      }
+    } catch (error) {
+      console.error("Error:", error);
+    }
+    circle.closePopup();
+  };
+
+  const cancelButton = document.createElement("button");
+  cancelButton.textContent = "Cancel";
+  cancelButton.onclick = () => {
+    map.removeLayer(circle);
+    if (circle._resizeHandles) {
+      circle._resizeHandles.forEach(handle => map.removeLayer(handle));
+    }
+    activeCircle = null;
+  };
+
+  popupContent.appendChild(colorPicker);
+  popupContent.appendChild(document.createElement("br"));
+  popupContent.appendChild(saveButton);
+  popupContent.appendChild(cancelButton);
+
+  circle.bindPopup(popupContent).openPopup();
+}
+
+map.getContainer().addEventListener("drop", (e) => {
+  e.preventDefault();
+  const iconType = e.dataTransfer.getData("icon-type");
+  if (!iconType) return;
+  
+  const latlng = map.mouseEventToLatLng(e);
+
+  if (iconType === "circle") {
+    createCustomCircle(latlng);
+  } else {
+    addIconToMap(latlng, iconType);
+  }
+});
+
+
+    function cancelIcon() {
+      if (editMarker) {
+        map.removeLayer(editMarker);
+        editMarker = null;
+      }
+    }
+
+    async function saveIcon() {
+      if (!editMarker) return;
+  
+      const latlng = editMarker.getLatLng();
+      const markerType = editMarker.markerType; 
+  
+      const data = {
+          type: markerType, 
+          lat: parseFloat(latlng.lat.toFixed(8)),
+          lng: parseFloat(latlng.lng.toFixed(8)),
+      };
+  
+      try {
+          const response = await fetch('/save-special-marker', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(data),
+          });
+  
+          const textResponse = await response.text();
+          console.log("🔹 Server Raw Response:", textResponse);
+  
+          try {
+              const jsonResponse = JSON.parse(textResponse);
+              if (response.ok) {
+                  alert('Marker saved successfully!');
+  
+                  map.removeLayer(editMarker);
+                  editMarker = null;
+  
+                  await fetchSpecialMarkers();
+              } else {
+                  alert('Error saving marker: ' + jsonResponse.error);
+              }
+          } catch (jsonError) {
+              console.error("Error parsing server response as JSON:", jsonError);
+              alert("Server returned invalid JSON! Check Flask logs.");
+          }
+  
+      } catch (error) {
+          console.error('Error saving marker:', error);
+          alert('An error occurred while saving the marker.');
+      }
+  }
+
+  
+  async function fetchSpecialMarkers() {
+    try {
+        const markerResponse = await fetch('/get-special-markers');
+        const specialMarkers = await markerResponse.json();
+
+        Object.values(specialMarkers).forEach(marker => map.removeLayer(marker));
+
+        specialMarkers.forEach((markerData) => {
+            const { type, lat, lng } = markerData;
+
+            const icon = L.divIcon({
+                html: `<div style="font-size: 24px;">${type === 'x' ? '❌' : '🏁'}</div>`,
+                className: '',
+            });
+
+            const marker = L.marker([lat, lng], { icon }).addTo(map);
+            specialMarkers[`${lat}-${lng}`] = marker; 
+        });
+
+    } catch (error) {
+        console.error('Error fetching special markers:', error);
+    }
+}
+
+
+async function updatePlayerLocation() {
+  const playerIdInput = document.getElementById("player-id");
+  const latitudeInput = document.getElementById("latitude");
+  const longitudeInput = document.getElementById("longitude");
+
+  const playerId = playerIdInput.value.trim();
+  const latitude = latitudeInput.value.trim();
+  const longitude = longitudeInput.value.trim();
+
+  if (!playerId || !latitude || !longitude) {
+      alert("Please fill in all fields!");
+      return;
+  }
+
+  const data = {
+      player_id: parseInt(playerId),
+      latitude: parseFloat(latitude),
+      longitude: parseFloat(longitude)
+  };
+
+  try {
+      const response = await fetch("/update-player", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+      });
+
+      const result = await response.json();
+      if (response.ok) {
+          fetchPlayerData();
+
+          playerIdInput.value = "";
+          latitudeInput.value = "";
+          longitudeInput.value = "";
+
+          console.log("Inputs cleared successfully!");
+      } else {
+          alert("Error: " + result.error);
+      }
+  } catch (error) {
+      console.error("Error updating player location:", error);
+  }
+}
+
+
+let isDrawing = false;
+let drawnItems = new L.FeatureGroup();
+map.addLayer(drawnItems);
+
+let currentPolygon = null;
+let currentPolyline = null;
+let tempLine = null;
+let vertexMarkers = [];
+let colorPicker = document.getElementById("color-picker");
+let selectedColor = colorPicker.value;
+
+colorPicker.addEventListener("input", () => {
+    selectedColor = colorPicker.value;
+});
+
+document.getElementById("toggle-move").addEventListener("click", enableMoveMode);
+document.getElementById("toggle-draw").addEventListener("click", enableDrawMode);
+
+
+function enableDrawMode() {
+  isDrawing = true;
+  map.dragging.disable();
+  map.doubleClickZoom.disable();
+  document.body.style.cursor = "crosshair";
+
+  document.getElementById("toggle-move").style.display = "inline-block";
+  document.getElementById("toggle-draw").style.display = "none";
+
+  if (currentPolygon) {
+      map.removeLayer(currentPolygon);
+      currentPolygon = null;
+  }
+  if (currentPolyline) {
+      map.removeLayer(currentPolyline);
+      currentPolyline = null;
+  }
+  if (tempLine) {
+      map.removeLayer(tempLine);
+      tempLine = null;
+  }
+
+  vertexMarkers.forEach(marker => map.removeLayer(marker));
+  vertexMarkers = [];
+
+  currentPolyline = L.polyline([], { color: selectedColor, weight: 2, dashArray: "5,5" }).addTo(map);
+}
+
+document.getElementById("toggle-move").style.display = "none";
+
+
+function enableMoveMode() {
+    isDrawing = false;
+    map.dragging.enable();
+    map.doubleClickZoom.enable();
+    document.body.style.cursor = "grab";
+
+    document.getElementById("toggle-move").style.display = "none";
+    document.getElementById("toggle-draw").style.display = "inline-block";
+
+    document.getElementById("cancel-drawing").style.display = "none";
+}
+
+
+map.on("click", (e) => {
+    if (!isDrawing) return;
+
+    const latlng = e.latlng;
+
+    // Create vertex marker
+    const marker = L.circleMarker(latlng, {
+        radius: 5,
+        color: selectedColor,
+        fillColor: "#fff",
+        fillOpacity: 1,
+        draggable: true
+    }).addTo(map);
+
+    vertexMarkers.push(marker);
+    marker.on("click", closePolygon);
+
+    let latlngs = currentPolyline.getLatLngs();
+    latlngs.push(latlng);
+    currentPolyline.setLatLngs(latlngs);
+
+    // Temporary line from last point to cursor
+    if (tempLine) map.removeLayer(tempLine);
+    tempLine = L.polyline([latlng], { color: selectedColor, dashArray: "5, 5" }).addTo(map);
+
+    map.on("mousemove", updateTempLine);
+});
+
+function updateTempLine(e) {
+    if (!isDrawing || !tempLine) return;
+    let latlngs = tempLine.getLatLngs();
+    if (latlngs.length > 0) {
+        latlngs[1] = e.latlng;
+        tempLine.setLatLngs(latlngs);
+    } else {
+        tempLine.setLatLngs([latlngs[0], e.latlng]);
+    }
+}
+
+function closePolygon() {
+  if (!isDrawing || vertexMarkers.length < 3) {
+      alert("You need at least 3 points to form a shape!");
+      return;
+  }
+
+  // Close shape
+  const latlngs = currentPolyline.getLatLngs();
+  latlngs.push(latlngs[0]); // Close loop
+
+  // Remove temp line
+  if (tempLine) {
+      map.removeLayer(tempLine);
+      tempLine = null;
+  }
+
+  // Remove old polyline
+  map.removeLayer(currentPolyline);
+
+  // Create polygon with fill
+  currentPolygon = L.polygon(latlngs, {
+      color: selectedColor,
+      fillColor: selectedColor,
+      fillOpacity: 0.4
+  }).addTo(drawnItems);
+
+  // Remove vertex markers after closing
+  vertexMarkers.forEach(marker => map.removeLayer(marker));
+  vertexMarkers = [];
+
+  isDrawing = false;
+  savePolygon();
+}
+
+async function savePolygon() {
+  if (!currentPolygon) {
+      alert("No shape detected. Draw a shape first.");
+      return;
+  }
+
+  // Prompt for a name immediately after closing the shape
+  const name = prompt("Enter a name for this drawing:");
+  if (!name) {
+      alert("Shape not saved. Removing...");
+      map.removeLayer(currentPolygon); 
+      currentPolygon = null;
+      enableMoveMode();
+      return;
+  }
+
+  let geojsonData = currentPolygon.toGeoJSON();
+
+  try {
+      const response = await fetch("/save-custom-drawing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+              name: name,
+              color: selectedColor,
+              geometry: geojsonData
+          })
+      });
+
+      if (response.ok) {
+
+          currentPolygon.bindTooltip(name, { permanent: true }).openTooltip();
+
+          resetDrawingState(); 
+      } else {
+          alert("Failed to save.");
+      }
+  } catch (error) {
+      console.error("Error saving drawing:", error);
+  }
+}
+
+function resetDrawingState() {
+  currentPolygon = null;
+  currentPolyline = null;
+  tempLine = null;
+
+  vertexMarkers.forEach(marker => map.removeLayer(marker));
+  vertexMarkers = [];
+
+  enableMoveMode();
+}
+
+document.getElementById("cancel-drawing").addEventListener("click", () => {
+  if (currentPolygon) {
+      map.removeLayer(currentPolygon);
+      currentPolygon = null;
+  }
+  if (currentPolyline) {
+      map.removeLayer(currentPolyline);
+      currentPolyline = null;
+  }
+  if (tempLine) {
+      map.removeLayer(tempLine);
+      tempLine = null;
+  }
+  
+  // Remove all vertex markers
+  vertexMarkers.forEach(marker => map.removeLayer(marker));
+  vertexMarkers = [];
+
+  enableMoveMode();
+});
+
+async function loadCustomDrawings() {
+  try {
+      const response = await fetch("/get-custom-drawings");
+      if (!response.ok) throw new Error("Failed to fetch drawings");
+
+      const drawings = await response.json();
+      console.log("Loaded Drawings:", drawings);
+
+      drawings.forEach(drawing => {
+          const polygon = L.geoJSON(drawing.geometry, {
+              style: { color: drawing.color, fillColor: drawing.color, fillOpacity: 0.4 }
+          }).addTo(map);
+
+          polygon.bindTooltip(drawing.name, { permanent: true }).openTooltip();
+      });
+  } catch (error) {
+      console.error("Error loading drawings:", error);
+  }
+}
+
+
+loadCustomDrawings();
+
+  </script>
+</body>
+</html>
